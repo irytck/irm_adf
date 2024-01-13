@@ -1,0 +1,425 @@
+---
+title: "Detección de zonas tumorales en resonancia magnética"
+subtitle: "Análisis de Datos Funcionales"
+author:
+  - Jesús Mudarra Luján 
+  - Iuliia Rytck
+date: "`r format(Sys.Date(), '%d de %B %Y')`"
+output:
+  pdf_document:
+    toc: yes
+    toc_depth: 4
+    number_sections: yes
+indent: true
+link-citations: true
+header-includes:
+  - \usepackage[spanish]{babel}
+  - \decimalcomma
+  - \definecolor{shadecolor}{RGB}{235,235,235}
+  - \setlength{\parskip}{1ex plus 0.5ex minus 0.2ex}
+  - \renewcommand{\and}{\\}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      comment = "",
+                      out.width = "70%",
+                      out.height = "70%",
+                      fig.align = "center",
+                      cache = TRUE)
+library(fda) # FDA functions - Ramsay and Silverman book
+library(fds) # Functional datasets
+library(Epi) # ROC curve
+library(caret)
+library(smotefamily)
+library(rpart)
+library(rpart.plot)
+library(randomForest)
+library(kernlab)
+```
+
+\newpage
+
+# Introducción
+
+Las imágenes de resonancia magnética (IRM) son una técnica de diagnóstico médico que permite obtener imágenes detalladas del interior del cuerpo humano. Utiliza campos magnéticos y ondas de radio para generar imágenes de alta resolución de los tejidos blandos, los órganos y las estructuras anatómicas.
+
+La resonancia magnética se basa en la interacción entre los átomos de hidrógeno presentes en el cuerpo y los campos magnéticos. Durante el procedimiento, el paciente se coloca en un escáner de resonancia magnética, el cual contiene contiene un imán potente. Este imán produce un campo magnético uniforme en el área a examinar. Cuando se aplica un pulso de radiofrecuencia al cuerpo, los átomos de hidrógeno se alinean con el campo magnético y emite señales que son captadas por antenas, especiales en el escáner. Estas señales se procesan mediante algoritmos para generar imágenes bidimensionales o tridimensionales de la zona de interés.
+
+Las IRM son muy utilizadas para visualizar tejidos blandos, como el cerebro, el corazón, los músculos o los órganos abdominales. Permiten detectar anomalías, como tumores, lesiones, inflamación o problemas estructurales, y proporcionan información detallada sobre la anatomía y la función de los tejidos.
+
+La resonancia magnética es una técnica no invasiva y no utiliza radiación ionizante, lo que la convierte en una opción segura para la mayoría de los pacientes. Sin embargo, hay ciertas contraindicaciones, como la presencia de dispositivos médicos implantados o claustrofobia en algunos casos.
+
+En el presente trabajo disponemos de imágenes IRM de perfusión. Este tipo de imágenes estudia como las moléculas de un contraste, inyectadas en el paciente, se difunden en el tejido estudiado a lo largo de una secuencia temporal, en nuestro caso 6 instantes.
+
+
+Cada una de las 6 imágenes están formadas por matrices de 432x432 píxeles, representados en cada columna de la base de datos, es decir, cada columna contiene un total de 186.624 observaciones (píxeles) de la imagen en un instante de tiempo determinado. Según expertos, en el segundo instante de tiempo, se deben eliminar aquellos píxeles que presenten intensidades menores a 50, por lo que se han eliminado un total de 106.815 píxeles, quedando por tanto, 79.809 píxeles, de los cuales, 62 píxeles son de la zona con presencia tumor y 79.747 píxeles de la zona de no-tumor (sano).
+
+
+\newpage
+
+## Carga de la base de datos
+
+```{r carga de datos}
+datos_sano <- read.table(file = "data/datos_sano.txt")
+datos_tumor <- read.table(file = "data/datos_tumor.txt")
+```
+
+\newpage
+
+# Representación de la base
+
+Disponemos de un gran número de observaciones con píxeles sin presencia de tumor, por lo que se ha decidido seleccionar las primeras 200 observaciones del conjunto de dator de tumor. Concatenamos ambos conjuntos de datos para obtener un único dataframe. En la siguiente figura podemos observar de color rojo el valor de las intensidades en las 62 muestras que tenemos de píxeles con tumor. Por otro lado, de color azul se representa el valor de los primeros 200 píxeles sin presencia de tumor (sanos). En primera instancia se observa una mayor variabilidad en el tiempo en las intensidades de los píxeles con tumor frente a los píxeles sanos.
+
+```{r data_prep}
+datos_sanos_sample <- datos_sano[1:200,] # primeros 200 pixeles del df datos_sano
+datos_tumor_sample <- datos_tumor
+
+datos_sanos_sample$Y <- rep(0,nrow(datos_sanos_sample))
+datos_tumor_sample$Y <- rep(1,nrow(datos_tumor_sample))
+
+df <- rbind(datos_sanos_sample,datos_tumor_sample)
+rownames(df) <- 1:nrow(df)  # renombrar filas
+X <- df[,1:6]
+Y <- df$Y
+
+argvals <- 1:6
+
+matplot(argvals, t(X[Y==0,]), type="l", lty=1, cex=2, ylim=c(0,180),
+        lwd=2, xlab = "t", ylab="Intensity", col="blue")
+matlines(argvals, t(X[Y==1,]), type="l", lty=1, cex=2,
+        lwd=2, xlab = "t", ylab="Intensity", col="red")
+legend('topright',bty = "n",c('No-tumor pixel', 'Tumor pixel'),
+       lty=1, lwd=2, col=c("blue","red"))
+```
+
+Siguiendo la ley de Ruppert, que establece una base por cada 4 o 5 observaciones con un máximo de 40, debemos establecer este parámetro en 40 ya que disponemos de 79.809 observaciones. Sin embargo, como podemos observar en la Shiny App `regression_splines.Rmd` adjunta a este proyecto, a partir de 10 bases, las curvas cambian de forma poco significativa, por lo que finalmente seleccionamos 10 bases.
+
+```{r}
+#Basis representation 
+nbasis <- 10 # number of basis functions for the representation of X(t)
+Bspline_basis <- create.bspline.basis(rangeval=range(argvals),nbasis) # Basis for X(t)
+X_fd <- Data2fd(y=t(X), argvals=argvals,
+                   basisobj=Bspline_basis) # Functional data object
+
+plot(X_fd[which(Y==0)], lty=1, xlab="t",
+     ylab="Intensity", col="blue", ylim=c(0,180))
+lines(X_fd[which(Y==1)],lty=1, col="red")
+legend('topright',bty = "n",c('No-tumor pixel', 'Tumor pixel'),
+       lty=1,lwd=1,col=c("blue","red"))
+```
+
+En las IRM, la intensidad de la señal puede variar en función de las propiedades físicas del tejido. En el caso del tejido con tumor y sin tumor, existen diferencias en las propiedades biológicas que pueden dar lugar a cambios en la intensidad de la señal. En general, el tejido tumoral suele presentar una mayor densidad celular y una mayor vascularización que el tejido sano. Estas diferencias pueden dar lugar a cambios en la intensidad. 
+
+La intensidad de la señal no es una característica específica del tejido tumoral y puede estar influenciada por factores técnicos, como el tipo de secuencia de resonancia magnética utilizada, la dosis y la concentración del agente de contraste utilizado, la calidad de la imagen, entre otros. Sin embargo, podemos observar en el siguiente gráfico que las observaciones de los píxeles con tumor presentan una mayor variabilidad en la intensidad de la señal, con subidas y bajadas rápidas. Esto se debe a que los tumores suelen tener una mayor heterogeneidad estructural y biológica en comparación con el tejido sano. Los tumores pueden tener áreas con diferentes grados de vascularización, diferentes tipos de células tumorales y diferentes grados de inflamación. Estas diferencias estructurales y biológicas dan lugar a una mayor variabilidad en la intensidad de la señal. Por otro lado, en el tejido sano la variabilidad en la intensidad de la señal es menor debido a que el tejido normal tiene una estructura más homogénea y una vascularización más estable. En general, el tejido sano no presenta cambios estructurales o biológicos significativos, lo que resulta una señal más uniforme. 
+
+```{r}
+plot(X_fd, lty=1,col="grey",ylab="Intensity",xlab="t", ylim=c(0,180))
+lines(X_fd[120], lwd=2, lty=4, col="blue")
+lines(X_fd[237], lwd=2, lty=4, col="purple")
+lines(mean.fd(X_fd[1:200]), lty=2, lwd=2, col="green")
+lines(mean.fd(X_fd[201:262]), lty=2, lwd=2, col="red")
+legend('topright',bty = "n",c('Total muestra', 'Píxel sano',
+                              'Píxel tumor', 'Media sanos', 'Media tumor'),
+       lty=1,lwd=1,col=c("grey","blue","purple","green","red"))
+```
+
+En el gráfico anterior se muestra de color gris todas las curvas de los píxeles del conjunto de datos. Por un lado, podemos apreciar en color morado una muestra que se ha extraído dentro del conjunto de píxeles con tumor. Comparándolo con la curva de color azul, que se trata de una curva del conjunto de píxeles sanos, podemos observar una mayor variabilidad en su intensidad a lo largo del tiempo. Análogamente, observando la curva de color rojo, que representa la media de intensidades de los píxeles con tumor, se muestra una mayor variabilidad en la intensidad que la media de las intensidades de los píxeles sanos, representada de color verde.
+
+\newpage
+
+# Estadísticos principales
+
+En este apartado se van a calcular y analizar los principales estadísticos sobre el objeto funcional X_fd anteriormente, calculado como son la media y mediana.
+
+```{r}
+sample_mean_fun <- mean.fd(X_fd)
+sample_mean_fun_sano <- mean.fd(X_fd[which(Y==0)])
+sample_mean_fun_tumor <- mean.fd(X_fd[which(Y==1)])
+
+plot(sample_mean_fun, ylim=c(40,100), lty=1, lwd=1, xlab="t", ylab="Intensity",
+     col="blue", main="Función media muestral")
+lines(sample_mean_fun_sano, lty=1,col="green")
+lines(sample_mean_fun_tumor, lty=1, col="red")
+legend("topright", bty = "n", c("Media de la muestra", "Media sano", "Media tumor"),
+       lty=1, lwd=1, col = c("blue", "green", "red"))
+```
+
+Para analizar las diferencias en la intensidad de la señal entre el tejido sano y el tejido tumoral se calcula la función media de todo el conjunto de datos de la muestra, así como la función media para los subconjuntos de tejido sano $(Y=0)$ y de tejido tumoral $(Y=1)$. En el gráfico anterior se pueden observar las tres funciones medias en diferentes colores: azul para la función media del conjunto completo de datos, verde para la función media de los datos de tejido sano y rojo para la función media de los datos de tejido tumoral.
+
+El gráfico muestra que la función media de la muestra de datos se encuentra entre las funciones medias de los dos subconjuntos de datos de tejido sano y tumoral, lo que sugiere que existen diferencias significativas en la intensidad de la señal entre estos dos tipos de tejido. Además, se puede apreciar que la función media de los datos de tejido tumoral presenta unos saltos de intensidad de señal mayor en comparación con la función media de los datos de tejido sano. Esto puede ser un indicio de la presencia de tumores con una mayor densidad celular y/o una mayor vascularización en comparación con el tejido sano.
+
+## Bandas de confianza puntuales
+
+```{r}
+#datos_sanos_sample
+plot(X_fd[which(Y==0)], lty=1, lwd=1, xlab="t", ylab="Intensity", col="grey",
+     main="Bandas de confianza puntuales en muestra píxeles sanos", ylim = c(-20,150))
+lines(sample_mean_fun_sano, lty=1, lwd=1, col="red")
+lines(sample_mean_fun_sano+2*std.fd(X_fd[which(Y==0)]), col="blue", lty=2, lwd=2)
+lines(sample_mean_fun_sano-2*std.fd(X_fd[which(Y==0)]), col="blue", lty =2, lwd=2)
+```
+
+El gráfico resultante muestra los datos de intensidad del tejido sano con el intervalo de confianza para la función media correspondiente. Este gráfico nos permite visualizar la variabilidad en los datos de intensidad de los tejidos sanos y proporciona información sobre la precisión de la función media estimada. En este caso, solo tenemos representacion de las 200 primeras observaciones para los píxeles sanos y se puede observar que las bandas de confianza son bastante estrechas, lo que sugiere que la función media estimada es significativamente precisa. Por otro lado, la variabilidad en los datos de intensidad del tejido sano es muy baja. Como se menciona anteriormente, esto debido a que el tejido normal tiene una estructura más homogénea y una vascularización más estable. En general, el tejido sano no presenta cambios estructurales o biológicos significativos, lo que resulta una señal más uniforme.
+
+```{r}
+plot(X_fd[which(Y==1)], lty=1, lwd=1, xlab="t", ylab="Intensity", col="grey",
+     main="Bandas de confianza puntuales en muestra píxeles tumor", ylim = c(-20,200))
+lines(sample_mean_fun_tumor, lty=1, lwd=1, col="red")
+lines(sample_mean_fun_tumor+2*std.fd(X_fd[which(Y==1)]), col="blue", lty=2, lwd=2)
+lines(sample_mean_fun_tumor-2*std.fd(X_fd[which(Y==1)]), col="blue", lty=2, lwd=2)
+```
+
+El gráfico anterior muestra los datos de intensidad del tejido tumoral con el intervalo de confianza para la función media correspondiente. Se puede observar que hay un aumento en la intensidad en la segunda imagen, luego vuelve a caer en la tercera, sube en la cuarta y se estabiliza. Las bandas de confianza (representadas de color azul) muestran que hay una variabilidad significativa en los datos tumorales, especialmente en los valores más altos de intensidad.
+
+```{r}
+# The sample variance function sano
+sample_var_fun <- std.fd(X_fd[which(Y==0)])^2
+plot(sample_var_fun, lty=1, lwd=1, xlab = "t", ylab="Intensity",
+     main = "Función de varianza de muestra para sanos")
+```
+
+El gráfico anterior muestra la función de varianza para los datos de píxeles sanos. Se observa que la varianza es mínima en la segunda imagen (segundo instante) y luego la varianza comienza a aumentar. A partir del tercer instante se mantiene constante. Esto sugiere que los datos de función de varianza de muestra para píxeles sanos son relativamente estables y no presentan una gran variabilidad en la intensidad. Sin embargo, sería interesante investigar si hay alguna explicación de la variabilidad en la señal en el instante 2 en comparación con el resto del tiempo. Podría haber factores biológicos que expliquen esta observación, como la dinámica de la distribución del contraste en los tejidos, la perfusión sanguínea o la difusión de los agentes de contraste. Otra posible explicación podría ser que al principio, cuando se introduce el contraste, el ruido de medición es menor.
+
+El siguiente gráfico muestra la función de varianza para los datos de función de varianza de muestra para píxeles con tumores. A diferencia del gráfico anterior, se observa que la varianza es significativamente más alta. Esto indica que los datos de función de varianza de muestra para píxeles con tumores presentan una mayor variabilidad en la intensidad y que esta variabilidad puede ser un indicador clave de la presencia de un tumor. En general, estos gráficos indican que la varianza de muestra puede ser una métrica útil para caracterizar la heterogeneidad de los datos de píxeles y ayudar en la detección de tumores.
+
+```{r, message=FALSE}
+# The sample variance function tumor
+sample_var_fun_tumor <- std.fd(X_fd[which(Y==1)])^2
+plot(sample_var_fun_tumor, lty=1, lwd=1, xlab = "t", ylab="Intensity",
+     main = "Función de varianza de muestra para tumor")
+```
+
+\newpage
+
+# Análisis de componentes principales funcionales
+
+El análisis de componentes principales en datos funcionales (FPCA) es una extensión del PCA tradicional que se aplica a conjuntos de datos que representan funciones en lugar de observaciones puntuales. En este caso, los datos se representan como curvas suaves o funciones continuas en lugar de puntos discretos.
+
+El FPCA permite analizar la variabilidad y las estructuras presentes en conjuntos de datos funcionales. En lugar de tratar cada función individualmente, el FPCA extrae componentes principales que representan patrones globales compartidos por las funciones del conjunto de datos.
+
+```{r}
+datos_sano$Y <- rep(0,nrow(datos_sano))
+datos_tumor$Y <- rep(1,nrow(datos_tumor))
+
+df_total <- rbind(datos_sano, datos_tumor)
+rownames(df_total) <- 1:nrow(df_total)
+
+X <- df_total[,1:6]
+Y <- df_total$Y
+
+X_fd <- Data2fd(y=t(X), argvals=argvals,
+                basisobj=Bspline_basis) # Functional data object
+```
+
+```{r fpca}
+fpca <- pca.fd(fdobj = X_fd, nharm = 4, centerfns = TRUE)
+
+weight_functions <- fpca$harmonics
+principal_components <- fpca$scores 
+(explained_variability <- round(fpca$varprop,4)*100)
+```
+
+La varianza explicada sobre los datos de las primeras 4 componentes principales es de `r round(sum(explained_variability),4)`\%. Como podemos observar, las primeras dos componentes principales explican más del 90\% de la variabilidad.
+
+## Funciones de peso estimadas w1(t),w2(t),w3(t),w4(t)
+
+```{r}
+par(mfrow=c(2,2))
+plot(weight_functions[1], ylab="Weight function 1", xlab="t", ylim=c(-1,1),
+     main=paste("PC1 ", "(",explained_variability[1],"%)",sep=""))
+plot(weight_functions[2], ylab="Weight function 2", xlab="t", ylim=c(-1,1),
+     main=paste("PC2 ", "(",explained_variability[2],"%)",sep=""))
+plot(weight_functions[3], ylab="Weight function 3", xlab="t", ylim=c(-1,1),
+     main=paste("PC3 ", "(",explained_variability[3],"%)",sep=""))
+plot(weight_functions[4], ylab="Weight function 4", xlab="t", ylim=c(-1,1),
+     main=paste("PC4 ", "(",explained_variability[4],"%)",sep=""))
+```
+
+En el gráfico anterior se representan las funciones de peso de cada componente principal, es decir, la forma en que cada variable contribuye a la variabilidad de la componente principal correspondiente.
+
+## Bandas de confianza para la función media Kwj(t)
+
+```{r}
+par(mfrow = c(2,2))
+plot.pca.fd(fpca, pointplot = TRUE, harm = 0, cycle = TRUE)
+```
+
+Las funciones resultantes representan un intervalo de confianza alrededor de la función de media muestral en cada uno de los componentes principales.
+
+## Representación gráfica de los Scores
+
+```{r}
+par(pty="s")
+plot(principal_components[,1], principal_components[,2], asp=1, col=Y+1, pch=19,
+     xlab="PC1", ylab="PC2", main="Gráfico de Scores",
+     xlim=c(-300,400),ylim=c(-300,400))
+legend("topright", legend=c("Sano", "Tumor"), pch=19, col=1:2, bty="n")
+
+```
+
+El gráfico permite visualizar la estructura de las observaciones en función de su distribución en el espacio de las dos primeras componentes principales. La posición de los puntos muestra cómo se relacionan las muestras entre sí en términos de su variabilidad.
+
+En cuanto a la distribucion de los datos, los píxeles tumorales están separados de los datos sanos a lo largo de la dirección de la PC1. Por otro lado, la dirección de la PC2 también parece contribuir a la separación de los datos, aunque en menor medida. En general, se puede decir que el análisis de componentes principales ha sido efectivo en identificar las diferencias entre los datos tumor y sanos. Sin embargo, hay cierta superposición entre los grupos, lo que indica que la separación no es perfecta. 
+
+\newpage
+
+# Clasificación de los píxeles
+
+## Modelo de regresión logística funcional
+
+Ajustamos el modelo de regresión logística con el objetivo de predecir la probabilidad de que una observación pertenezca a la clase "tumor" o "sano" en función de 4 componentes principales.
+
+```{r}
+Z <- data.frame(Y, principal_components)
+logit_model <- glm(Y~., family=binomial(link="logit"), data=Z)
+logit_model
+```
+
+El resultado del ajuste muestra los coeficientes de regresión para cada variable predictora. El intercepto indica la probabilidad de la categoría de referencia (en este caso, píxel sano) cuando todas las variables explicativas son igual a cero. Los coeficientes para cada variable explicativa muestran como esa componente afecta la probabilidad de pertenecer a la clase tumor.
+
+En este caso, el intercepto tiene un valor de $-9,4871$, lo que indica la probabilidad de que una observación sea sana, cuando todas las variables explicativas son cero. Los coeficientes para $X1$, $X2$, $X3$ y $X4$ son $-0,018577$, $-0,0087$, $0,0323$ y $-0,0173$, respectivamente. Esto significa que $X1$, $X2$ y $X4$ tienen un efecto negativo, ya que aumentar el valor de estos coeficientes aumenta la probabilidad de ser tumor, mientras que $X3$ tiene el efecto contrario al tener signo positivo.
+
+El AIC proporciona una medida relativa de la calidad del modelo, y tiene un valor de $827,7$, lo que indica que el modelo ajustado tiene un buen ajuste a nuestro conjunto de datos.
+
+## Parámetro funcional $\beta(t)$
+
+El parámetro funcional $\beta(t)$ se trata de una función que describe cómo cambia una variable o una relación en función del tiempo (t).
+
+En el siguiente gráfico podemos observar que entre el primer y tercer instante, es decir, la intensidad de los píxeles a través de las primeras 3 imágenes, el valor de $\beta$ disminuye de forma abrupta con tendencia negativa lineal. En el tercer intervalo de tiempo hay un cambio de tendencia al alza hasta estabilizarse en los siguientes instantes de tiempo con un valor de $\beta$ de $-0.015$.
+
+```{r}
+# Regression coefficients: gamma 1 and gamma 2
+gamma <- logit_model$coefficients[-1] # avoiding the intercept
+gamma <- as.vector(gamma) # now gamma is a 4-vector
+
+# Principal components weight functions: w1(t) and w2(t)
+# weight_functions: is a fd object, so we consider its basis coefs:
+weight_functions_coefs <- coef(weight_functions) # 10x4-matrix (p=10 basis functions)
+
+# Basis coefficients of beta(t)
+beta_coefs <- weight_functions_coefs %*% gamma
+
+# Regression function - parameter function
+beta_fd <- fd(beta_coefs, Bspline_basis)
+plot(beta_fd, lwd=2, main="Parámetro funcional beta",
+     xlab="t", ylab="Intensity")
+```
+
+## Bondad de ajuste del modelo propuesto
+
+Mediante la curva Receiver Operating Characteristic (ROC) podemos visualizar y evaluar el rendimiento de nuestro modelo en términos de capacidad para distinguir entre las dos clases (tumor y sano).
+
+Como observamos en el siguiente gráfico, el punto de corte óptimo obtenido es de: $0.001$. Esto significa que, debido al desbalanceo de clases, se debe de fijar un punto de corte restrictivo. Con este punto óptimo, cuando la probabilidad obtenida en la predicción sea $\geq 0,999$ lo consideramos como 1, es decir, que se trata de un píxel de tumor. En caso de obtener un valor $<0.999$, lo consideraríamos como píxel sano. Como veremos en la siguiente sección, este punto de corte es excesivamente restrictivo y se deberá de bajar para obtener un modelo más generalista, evitando de esta manera el overfitting.
+
+Por otro lado, el área bajo la curva ROC es: $0.935$. Por tanto, el modelo es aceptable en términos de predicción.
+
+```{r}
+ROC(form=Y~., data=Z, plot="ROC")
+```
+
+## Otros modelos de clasificación
+
+En este apartado, se muestra la implementación de otros modelos de clasificación con la finalidad de comparar sus métricas y seleccionar el mejor modelo para predecir la presencia o no de tumor en un píxel de una imagen IRM de perfusión.
+
+Para evaluar los modelos se ha decidido dividir el conjunto de datos en un conjunto de entrenamiento y un conjunto de test. La relación en la partición es de 80 - 20\%. Se van a utilizar técnicas de balanceo de clases (oversampling) para crear un nuevo conjunto de datos balanceados sintéticamente a partir del conjunto de entrenamiento desbalanceado original. De esta manera, cuando entrenemos nuestro modelo, tendremos aproximadamente la misma proporción de observaciones de ambas clases y aumentamos el rendimiento de nuestros clasificadores.
+
+A continuación, se han creado distintos modelos de clasificación mediante regresión logística, árboles de clasificación, Random Forest, KNN y SVM.
+
+### Regresión logit
+
+```{r}
+# Particion en train (80%) y test (20%)
+set.seed(115) # 115 buen resultado
+
+trainIndex <- createDataPartition(Z$Y, p=.8, list = FALSE, times = 1)
+Xtrain <- Z[trainIndex,]
+Xtest <- Z[-trainIndex,]
+
+train_smote <- SMOTE(Xtrain,Xtrain$Y, K=5)
+train_smote <- train_smote$data
+train_smote$class <- NULL
+```
+
+\newpage
+
+```{r, warning=FALSE}
+logit.reg <- glm(Y~., family=binomial(link="logit"), data=train_smote)
+pred.logit.test <- predict(logit.reg,Xtest,type="response")
+
+cm.log.reg <- confusionMatrix(as.factor(ifelse(pred.logit.test > 0.78,1,0)),
+                               as.factor(Xtest[,1]))
+```
+
+### Árbol de Clasificación
+
+```{r}
+default.ct <- rpart(Y~., data = train_smote, method = "class")
+pred.ct.test <- predict(default.ct, Xtest, type = "prob")
+
+cm.ct <- confusionMatrix(as.factor(ifelse(pred.ct.test[,2] > 0.78,1,0)),
+                         as.factor(Xtest[,1]))
+```
+
+### Random Forest
+
+```{r, warning=FALSE}
+rf <- randomForest(Y~., data = train_smote,
+                   mtry=2, method="class", importance=TRUE) #mtry=2 raiz(4)
+
+pred.rf.test <- predict(rf, Xtest, type="class")
+cm.rf <- confusionMatrix(as.factor(ifelse(pred.rf.test > 0.78,1,0)),
+                         as.factor(Xtest[,1]))
+```
+
+### KNN
+
+```{r}
+library(class)
+knn <- knn(train_smote,Xtest,
+           cl=factor(train_smote[,1]), k = 3, prob = TRUE)
+cm.knn <- confusionMatrix(knn,
+                          factor(Xtest[,1]))
+```
+
+### SVM
+
+```{r}
+ksvm <- ksvm(Y~., data = train_smote, type = "C-svc",
+             kernel = "rbfdot",kpar = "automatic")
+pred.ksvm.test <- predict(ksvm, Xtest)
+cm.ksvm <- confusionMatrix(factor(pred.ksvm.test),
+                           factor(Xtest[,1]))
+```
+
+Para los clasificadores que nos devuelve un valor de probabilidad entre 0 y 1 en la predicción se ha decidido fijar el punto de corte de manera que determinamos que hay presencia de tumor cuando se obtenga un valor $\geq 0.78$. Este valor ha sido seleccionado fruto de la experiencia en la elaboración de los modelos.
+
+\newpage
+
+### Tabla comparativa de las métricas
+
+En la siguiente tabla se indican las principales métricas obtenidas para cada uno de los clasificadores.
+
+| \textbf{Model} | \textbf{Specificity} | \textbf{Precision} | \textbf{Recall} | \textbf{F-Score} |
+|----|----|----|----|----|
+|  Logit Reg.  | `r round(cm.log.reg$byClass[2],4)` | `r round(cm.log.reg$byClass[5],4)` | `r round(cm.log.reg$byClass[6],4)` | `r round(cm.log.reg$byClass[7],4)` |
+|  Classif. Tree  | `r round(cm.ct$byClass[2],4)` | `r round(cm.ct$byClass[5],4)` | `r round(cm.ct$byClass[6],4)` | `r round(cm.ct$byClass[7],4)` |
+|  \textbf{Random Forest}  | \textbf{`r round(cm.rf$byClass[2],4)`} | \textbf{`r round(cm.rf$byClass[5],4)`} | \textbf{`r round(cm.rf$byClass[6],4)`} | \textbf{`r round(cm.rf$byClass[7],4)`} |
+|  KNN  | `r round(cm.knn$byClass[2],4)` | `r round(cm.knn$byClass[5],4)` | `r round(cm.knn$byClass[6],4)` | `r round(cm.knn$byClass[7],4)` |
+|  SVM  | `r round(cm.ksvm$byClass[2],4)` | `r round(cm.ksvm$byClass[5],4)` | `r round(cm.ksvm$byClass[6],4)` | `r round(cm.ksvm$byClass[7],4)` |
+
+Como se puede observar en la tabla anterior, en los clasificadores de Random Forest, KNN y SVM se han obtenido valores especificidad muy bajos debido a que en esos modelos, de las 15 observaciones asignadas al conjunto de test de la clase 1 (presencia de tumor), se obtuvieron más falsos negativos que verdaderos positivos.
+
+Estableciendo como métrica de prioridad el F-Score, que se trata de la media armónica que combina los valores de la Precision y el Recall, el mejor modelo de clasificación es el Random Forest.
+
+\newpage
+
+# Conclusiones
+
+Este proyecto se ha enfocado en el estudio de la detección de zonas tumorales en imágenes IRM de perfusión mediante la visualización y análisis de los datos funcionales obtenidos.
+
+A partir del análisis de los datos, se ha observado que los píxeles con presencia de tumor presentan una mayor variabilidad en la intensidad de la señal en comparación con los píxeles sanos. Esto puede deberse a la heterogeneidad estructural y biológica de los tumores, que generan cambios en la intensidad de la señal. También, se han analizado los principales estadísticos de los datos, media y mediana, observando grandes diferencias en la intensidad de la señal entre los tejidos sanos y tumorales.
+
+Se ha realizado un FPCA con las 6 variables originales y se han comparado distintos modelos de clasificación de los píxeles. Debido al enorme desbalanceo entre la clase "sano" y "tumor" se ha decidido aplicar técnicas de oversampling sobre el conjunto de entrenamiento para aumentar la eficacia de los clasificadores. Por este mismo motivo, también se ha tenido que modificar el punto de corte a un valor de $0.78$ para determinar cuando una observación es considerada tumoral o no.
+
+Se ha observado en las métricas de los clasificadores que debido a la baja cantidad de observaciones pertenientes a píxeles con tumor en el conjunto de entrenamiento, en algunos modelos se han obtenido valores de especificidad muy bajos. Entre todos los clasificadores se ha decidido seleccionar el Random Forest como el mejor, tomando como métrica de prioridad el F-Score.
